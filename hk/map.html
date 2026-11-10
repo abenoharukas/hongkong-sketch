@@ -23,14 +23,15 @@
 const meta = {
   dir: "tiles",
   tileSize: 512,
-  maxLevel: 2,
-  width: 1858,
-  height: 1234,
-  focusX: 929,
-  focusY: 617,
+  tileOverlap: 1,
+  maxLevel: 4,
+  width: 6144,
+  height: 4096,
+  focusX: 3072,
+  focusY: 2048,
   maxScale: 8,
   bg: "rgb(41,111,108)",
-  version: "1794304198"
+  version: "1794306995"
 };
 const view = document.getElementById("view");
 const map = document.getElementById("map");
@@ -80,16 +81,17 @@ function tile(level, tx, ty) {
   img.src = DIR + "/z" + level + "/" + tx + "_" + ty + ".png?v=" + meta.version;
   return null;
 }
-// A tile at level L may be narrower than 512 (the map rarely ends on a tile
-// boundary), so draw it at the size it actually covers rather than stretching
-// it to a full tile.
+// Tiles carry one pixel of their neighbour on each side (Deep Zoom overlap).
+// The sliver is drawn into the seam as well, so a tile that is resampled to a
+// fractional scale never has to clamp at its own edge - that clamp was showing
+// up as a one-pixel line on every tile boundary. Coordinates stay fractional;
+// rounding them would reintroduce the gap.
 function blit(img, left, top, px, py, factor) {
+  const o = (meta.tileOverlap || 0) * factor;      // overlap in map pixels
   const w = img.naturalWidth * factor, h = img.naturalHeight * factor;
-  const dx = Math.round(left + px * scale);
-  const dy = Math.round(top + py * scale);
-  ctx.drawImage(img, dx, dy,
-    Math.round(left + (px + w) * scale) - dx,
-    Math.round(top + (py + h) * scale) - dy);
+  ctx.drawImage(img,
+    left + (px - o) * scale, top + (py - o) * scale,
+    w * scale, h * scale);
 }
 function apply() {
   const vw = view.clientWidth, vh = view.clientHeight;

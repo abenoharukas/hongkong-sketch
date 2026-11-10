@@ -235,8 +235,14 @@ def from_redraw(path, size, colours):
     return image
 
 
-def pyramid(image, out_dir, tile=TILE):
-    """Deep-zoom levels, parent pixel = mean of its four children."""
+def pyramid(image, out_dir, tile=TILE, overlap=1):
+    """Deep-zoom levels, parent pixel = mean of its four children.
+
+    Every tile is saved `overlap` pixels larger on each side, carrying a sliver
+    of its neighbour. The viewer draws that sliver into the seam, so when a tile
+    is resampled to a fractional scale its bilinear filter has real pixels to
+    sample instead of clamping at its own edge - which is what put a one-pixel
+    line on every tile boundary. Same trick as Deep Zoom."""
     if os.path.isdir(out_dir):
         shutil.rmtree(out_dir)
     width, height = image.size
@@ -248,14 +254,17 @@ def pyramid(image, out_dir, tile=TILE):
         sw = max(1, -(-width // factor))
         sh = max(1, -(-height // factor))
         scaled = image if factor == 1 else image.resize((sw, sh), Image.LANCZOS)
+        # pad by edge replication so the outermost tiles get a sliver too
+        padded = Image.fromarray(np.pad(np.asarray(scaled), ((overlap, overlap), (overlap, overlap), (0, 0)), mode="edge"))
         cols = (sw + tile - 1) // tile
         rows = (sh + tile - 1) // tile
         folder = os.path.join(out_dir, "z%d" % level)
         os.makedirs(folder, exist_ok=True)
         for ty in range(rows):
             for tx in range(cols):
-                box = (tx * tile, ty * tile, min(sw, (tx + 1) * tile), min(sh, (ty + 1) * tile))
-                scaled.crop(box).save(os.path.join(folder, "%d_%d.png" % (tx, ty)))
+                box = (tx * tile, ty * tile, tx * tile + tile + 2 * overlap,
+                       ty * tile + tile + 2 * overlap)
+                padded.crop(box).save(os.path.join(folder, "%d_%d.png" % (tx, ty)))
     return levels, width, height
 
 
@@ -266,6 +275,7 @@ def write_page(levels, width, height, bg):
         "const meta = {\n"
         '  dir: "tiles",\n'
         f"  tileSize: {TILE},\n"
+        "  tileOverlap: 1,\n"
         f"  maxLevel: {levels},\n"
         f"  width: {width},\n"
         f"  height: {height},\n"
@@ -281,7 +291,7 @@ def write_page(levels, width, height, bg):
 
 
 def main():
-    plate_dir = _arg("--plate", os.path.join(ROOT, "shots", "plate"))
+    plate_dir = _arg("--plate", os.path.join(HERE, "source", "plate"))
     check_only = "--check" in sys.argv
     px = int(_arg("--px", PX))
     colours = int(_arg("--colours", COLOURS))
@@ -315,6 +325,8 @@ def main():
             redraw = clean
         art = from_redraw(redraw, None, int(_arg("--redraw-colours", "0")))
         print(f"  redraw {redraw}")
+    elif "--raw" in sys.argv:
+        art = plate                      # 原图直出，不做风格化，用来看瓦片衔接
     else:
         art = stylise(plate, px, colours, ink)
     art.save(os.path.join(HERE, "art.png"))
