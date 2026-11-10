@@ -1,0 +1,12 @@
+.venv/
+hk/.venv-diff/
+__pycache__/
+*.pyc
+.DS_Store
+
+.env
+hk/key.js
+
+# 48 MB 的整幅底图（由 hk/source/plate 的 24 个窗口拼出来，可随时重建）
+hk/plate.png
+hk/redraw-clean.png

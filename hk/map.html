@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>香港岛</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #1c2430; }
+  #view { position: fixed; inset: 0; cursor: grab; touch-action: none; user-select: none; }
+  #view.dragging { cursor: grabbing; }
+  #map { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #credit {
+    position: fixed; right: 12px; bottom: 8px; z-index: 2; pointer-events: none;
+    color: #d5dde6; font: 12px/1.4 sans-serif;
+    background: rgba(20, 28, 36, 0.55); padding: 4px 8px;
+  }
+</style>
+</head>
+<body>
+<div id="view"><canvas id="map"></canvas></div>
+<div id="credit">拖动查看 · 滚轮缩放 · 三维影像 © Google Maps</div>
+<script>
+const meta = {
+  dir: "tiles",
+  tileSize: 512,
+  maxLevel: 2,
+  width: 1858,
+  height: 1234,
+  focusX: 929,
+  focusY: 617,
+  maxScale: 8,
+  bg: "rgb(41,111,108)",
+  version: "1794304198"
+};
+const view = document.getElementById("view");
+const map = document.getElementById("map");
+const TILE = meta.tileSize;
+const DIR = meta.dir;
+const MAX_LEVEL = meta.maxLevel;
+const MAX_SCALE = meta.maxScale;
+const ctx = map.getContext("2d");
+const tileCache = new Map();
+let camX = meta.focusX;
+let camY = meta.focusY;
+let scale = 1;
+let tileLevel = -1;
+let pointerId = null;
+const pointers = new Map();
+let pinch = null;
+
+function fitScale() {
+  return Math.min(view.clientWidth / meta.width, view.clientHeight / meta.height);
+}
+function limitScale(next) {
+  return Math.max(fitScale() * 0.92, Math.min(MAX_SCALE, next));
+}
+function clamp() {
+  const vw = view.clientWidth, vh = view.clientHeight;
+  scale = limitScale(scale);
+  const margin = 48;
+  const minX = (vw / 2 - margin) / scale;
+  const maxX = meta.width - (vw / 2 - margin) / scale;
+  const minY = (vh / 2 - margin) / scale;
+  const maxY = meta.height - (vh / 2 - margin) / scale;
+  camX = minX > maxX ? meta.width / 2 : Math.max(minX, Math.min(maxX, camX));
+  camY = minY > maxY ? meta.height / 2 : Math.max(minY, Math.min(maxY, camY));
+}
+function levelFor(s) {
+  const want = MAX_LEVEL + Math.log2(s);
+  return Math.max(0, Math.min(MAX_LEVEL, Math.round(want)));
+}
+function tile(level, tx, ty) {
+  const key = level + "/" + tx + "/" + ty;
+  const hit = tileCache.get(key);
+  if (hit !== undefined) return hit;
+  const img = new Image();
+  tileCache.set(key, null);
+  img.onload = () => { tileCache.set(key, img); apply(); };
+  img.onerror = () => { tileCache.set(key, false); };
+  img.src = DIR + "/z" + level + "/" + tx + "_" + ty + ".png?v=" + meta.version;
+  return null;
+}
+// A tile at level L may be narrower than 512 (the map rarely ends on a tile
+// boundary), so draw it at the size it actually covers rather than stretching
+// it to a full tile.
+function blit(img, left, top, px, py, factor) {
+  const w = img.naturalWidth * factor, h = img.naturalHeight * factor;
+  const dx = Math.round(left + px * scale);
+  const dy = Math.round(top + py * scale);
+  ctx.drawImage(img, dx, dy,
+    Math.round(left + (px + w) * scale) - dx,
+    Math.round(top + (py + h) * scale) - dy);
+}
+function apply() {
+  const vw = view.clientWidth, vh = view.clientHeight;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.round(vw * dpr), h = Math.round(vh * dpr);
+  if (map.width !== w || map.height !== h) { map.width = w; map.height = h; }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = meta.bg || "#1c2430";
+  ctx.fillRect(0, 0, vw, vh);
+  const left = vw / 2 - camX * scale;
+  const top = vh / 2 - camY * scale;
+  const level = levelFor(scale);
+  if (level !== tileLevel) { tileCache.clear(); tileLevel = level; }
+  const span = Math.pow(2, MAX_LEVEL - level) * TILE;
+  const k = span * scale;
+  const nx = Math.ceil(meta.width / span);
+  const ny = Math.ceil(meta.height / span);
+  const x0 = Math.max(0, Math.floor(-left / k));
+  const x1 = Math.min(nx - 1, Math.floor((vw - left) / k));
+  const y0 = Math.max(0, Math.floor(-top / k));
+  const y1 = Math.min(ny - 1, Math.floor((vh - top) / k));
+  ctx.imageSmoothingEnabled = k < TILE;
+  const holes = [];
+  for (let ty = y0; ty <= y1; ty++) {
+    for (let tx = x0; tx <= x1; tx++) {
+      const img = tile(level, tx, ty);
+      if (img) blit(img, left, top, tx * span, ty * span, span / TILE);
+      else holes.push([tx, ty]);
+    }
+  }
+  if (holes.length && level < MAX_LEVEL) {
+    const up = level + 1;
+    const uspan = Math.pow(2, MAX_LEVEL - up) * TILE;
+    const done = new Set();
+    for (const [tx, ty] of holes) {
+      const ux = Math.floor((tx * span) / uspan);
+      const uy = Math.floor((ty * span) / uspan);
+      const key = ux + "/" + uy;
+      if (done.has(key)) continue;
+      done.add(key);
+      const img = tile(up, ux, uy);
+      if (img) blit(img, left, top, ux * uspan, uy * uspan, uspan / TILE);
+    }
+  }
+}
+function zoomAt(screenX, screenY, next) {
+  const vw = view.clientWidth, vh = view.clientHeight;
+  const ix = camX + (screenX - vw / 2) / scale;
+  const iy = camY + (screenY - vh / 2) / scale;
+  scale = limitScale(next);
+  camX = ix - (screenX - vw / 2) / scale;
+  camY = iy - (screenY - vh / 2) / scale;
+  clamp();
+  apply();
+}
+function fit() {
+  scale = fitScale();
+  camX = meta.width / 2;
+  camY = meta.height / 2;
+  clamp();
+  apply();
+}
+fit();
+view.addEventListener("pointerdown", (e) => {
+  if (e.pointerType === "mouse" && e.button !== 0) return;
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  view.setPointerCapture(e.pointerId);
+  if (pointers.size === 1) {
+    pointerId = e.pointerId;
+    view.classList.add("dragging");
+    pinch = null;
+  } else if (pointers.size === 2) {
+    pointerId = null;
+    view.classList.remove("dragging");
+    const pts = [...pointers.values()];
+    pinch = { dist: Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1, scale };
+  }
+});
+view.addEventListener("pointermove", (e) => {
+  if (!pointers.has(e.pointerId)) return;
+  const prev = pointers.get(e.pointerId);
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pointers.size >= 2 && pinch) {
+    const pts = [...pointers.values()];
+    const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
+    zoomAt((pts[0].x + pts[1].x) / 2, (pts[0].y + pts[1].y) / 2, pinch.scale * dist / pinch.dist);
+    return;
+  }
+  if (e.pointerId !== pointerId) return;
+  camX -= (e.clientX - prev.x) / scale;
+  camY -= (e.clientY - prev.y) / scale;
+  clamp();
+  apply();
+});
+function endDrag(e) {
+  pointers.delete(e.pointerId);
+  if (pointers.size < 2) pinch = null;
+  if (e.pointerId === pointerId) {
+    pointerId = null;
+    view.classList.remove("dragging");
+  }
+}
+view.addEventListener("pointerup", endDrag);
+view.addEventListener("pointercancel", endDrag);
+view.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const gain = e.ctrlKey ? 0.012 : 0.0016;
+  zoomAt(e.clientX, e.clientY, scale * Math.exp(-e.deltaY * gain));
+}, { passive: false });
+window.addEventListener("keydown", (e) => {
+  const k = e.key.toLowerCase();
+  if (k === "0") fit();
+  if (k === "+" || k === "=") zoomAt(view.clientWidth / 2, view.clientHeight / 2, scale * 1.25);
+  if (k === "-" || k === "_") zoomAt(view.clientWidth / 2, view.clientHeight / 2, scale / 1.25);
+});
+window.addEventListener("resize", fit);
+</script>
+</body>
+</html>

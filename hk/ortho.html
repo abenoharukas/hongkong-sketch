@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ortho plate</title>
+<script>
+  window.__errs = [];
+  window.addEventListener("error", (e) => window.__errs.push(String(e.message || e)));
+  window.addEventListener("unhandledrejection", (e) => window.__errs.push("rej: " + String(e.reason)));
+</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cesium@1.118/Build/Cesium/Widgets/widgets.css">
+<script src="https://cdn.jsdelivr.net/npm/cesium@1.118/Build/Cesium/Cesium.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
+  #c { position: fixed; inset: 0; }
+  .cesium-widget, .cesium-widget canvas { width: 100%; height: 100%; }
+  .cesium-viewer-bottom, .cesium-widget-credits, .cesium-viewer-toolbar,
+  .cesium-viewer-animationContainer, .cesium-viewer-timelineContainer,
+  .cesium-viewer-fullscreenContainer { display: none !important; }
+</style>
+</head>
+<body>
+<div id="c"></div>
+<script>
+// One orthographic camera looking at Hong Kong Island. Every window is the
+// same camera translated along the picture's right/up axes, so neighbouring
+// windows line up exactly: with parallel rays there is no parallax to fix.
+//
+//   ortho.html?key=KEY&lon=..&lat=..&mpp=..&az=..&tilt=..&w=..&h=..&cols=..&rows=..
+//
+// window.shoot(i, j) resolves once the tiles for that window have landed.
+
+const q = new URLSearchParams(location.search);
+const KEY = q.get("key");
+const S = {
+  lon: parseFloat(q.get("lon")),
+  lat: parseFloat(q.get("lat")),
+  mpp: parseFloat(q.get("mpp")),          // metres per picture pixel
+  az: parseFloat(q.get("az") ?? "-15"),   // bearing of the view, degrees from north
+  tilt: parseFloat(q.get("tilt") ?? "45"),// degrees below horizontal
+  w: parseInt(q.get("w") ?? "1024", 10),
+  h: parseInt(q.get("h") ?? "1024", 10),
+  cols: parseInt(q.get("cols") ?? "1", 10),
+  rows: parseInt(q.get("rows") ?? "1", 10),
+  overlap: parseFloat(q.get("overlap") ?? "0"), // picture pixels shared by neighbours
+  sse: parseFloat(q.get("sse") ?? "4"),
+  dist: parseFloat(q.get("dist") ?? "20000"),
+};
+
+const viewer = new Cesium.Viewer("c", {
+  baseLayer: false,
+  baseLayerPicker: false,
+  geocoder: false,
+  homeButton: false,
+  sceneModePicker: false,
+  navigationHelpButton: false,
+  animation: false,
+  timeline: false,
+  fullscreenButton: false,
+  infoBox: false,
+  selectionIndicator: false,
+  requestRenderMode: true,
+  contextOptions: {
+    webgl: { preserveDrawingBuffer: true, alpha: false, antialias: true },
+  },
+});
+viewer.useBrowserRecommendedResolution = false;
+const scene = viewer.scene;
+scene.globe.show = false;
+scene.skyBox.show = false;
+scene.skyAtmosphere.show = false;
+scene.sun.show = false;
+scene.moon.show = false;
+scene.fog.enabled = false;
+scene.highDynamicRange = false;
+scene.backgroundColor = Cesium.Color.fromCssColorString("#1c2430");
+
+let tileset = null;
+const tilesetReady = Cesium.Cesium3DTileset.fromUrl(
+  "https://tile.googleapis.com/v1/3dtiles/root.json?key=" + encodeURIComponent(KEY),
+  {
+    maximumScreenSpaceError: S.sse,
+    skipLevelOfDetail: false,
+    maximumMemoryUsage: 8192,
+    showCreditsOnScreen: false,
+  }
+).then((t) => {
+  tileset = t;
+  scene.primitives.add(t);
+  return t;
+}).catch((e) => {
+  window.__errs.push("tileset: " + (e && (e.stack || e.message || e)));
+});
+
+// Local east / north / up at the plate's centre.
+const origin = Cesium.Cartesian3.fromDegrees(S.lon, S.lat);
+const basis = Cesium.Matrix4.getMatrix3(
+  Cesium.Transforms.eastNorthUpToFixedFrame(origin),
+  new Cesium.Matrix3()
+);
+const mul = (v) => Cesium.Matrix3.multiplyByVector(basis, v, new Cesium.Cartesian3());
+const EAST = mul(new Cesium.Cartesian3(1, 0, 0));
+const NORTH = mul(new Cesium.Cartesian3(0, 1, 0));
+const UP = mul(new Cesium.Cartesian3(0, 0, 1));
+
+const add = (...vs) => vs.reduce((a, b) => Cesium.Cartesian3.add(a, b, new Cesium.Cartesian3()));
+const scale = (v, s) => Cesium.Cartesian3.multiplyByScalar(v, s, new Cesium.Cartesian3());
+const unit = (v) => Cesium.Cartesian3.normalize(v, new Cesium.Cartesian3());
+
+const azr = Cesium.Math.toRadians(S.az);
+const tir = Cesium.Math.toRadians(S.tilt);
+// Direction the camera looks along: down the picture's "into the scene" axis.
+const DIR = unit(add(
+  scale(EAST, Math.sin(azr) * Math.cos(tir)),
+  scale(NORTH, Math.cos(azr) * Math.cos(tir)),
+  scale(UP, -Math.sin(tir))
+));
+const RIGHT = unit(Cesium.Cartesian3.cross(DIR, UP, new Cesium.Cartesian3()));
+const CAMUP = unit(Cesium.Cartesian3.cross(RIGHT, DIR, new Cesium.Cartesian3()));
+
+// Orthographic window size in metres, including the shared overlap.
+const spanX = (S.w - S.overlap) * S.mpp;
+const spanY = (S.h - S.overlap) * S.mpp;
+const frustum = new Cesium.OrthographicFrustum({
+  width: S.w * S.mpp,
+  aspectRatio: S.w / S.h,
+  near: 1.0,
+  far: S.dist * 4,
+});
+if (q.get("ortho") !== "0") viewer.camera.frustum = frustum;
+
+function place(i, j) {
+  // Centre of window (i, j) measured from the plate's centre, in picture axes.
+  const cx = (i + 0.5) * spanX - (S.cols * spanX) / 2;
+  const cy = (j + 0.5) * spanY - (S.rows * spanY) / 2;
+  const eye = add(
+    origin,
+    scale(DIR, -S.dist),
+    scale(RIGHT, cx),
+    scale(CAMUP, -cy)
+  );
+  viewer.camera.position = eye;
+  viewer.camera.direction = DIR;
+  viewer.camera.up = CAMUP;
+  viewer.camera.right = RIGHT;
+  if (q.get("ortho") !== "0") viewer.camera.frustum = frustum;
+  viewer.scene.requestRender();
+}
+
+let pending = null;
+const frames = 3;
+
+async function settle() {
+  // The camera just moved, so Cesium is only now asking for the tiles this
+  // window needs. Wait until the request count has been still for a moment;
+  // "tilesLoaded" alone is true before the first request is even made.
+  let still = 0;
+  let lastCount = -1;
+  let sawTiles = false;
+  for (let n = 0; n < 1200; n++) {
+    viewer.resize();
+    scene.render();
+    await new Promise((r) => setTimeout(r, 50));
+    if (!tileset) continue;
+    const loading = tileset.statistics.numberOfTilesLoading;
+    const total = tileset.statistics.numberOfTilesTotal;
+    if (total > 0) sawTiles = true;
+    if (sawTiles && tileset.tilesLoaded && loading === 0 && total === lastCount) {
+      still += 50;
+    } else {
+      still = 0;
+    }
+    lastCount = total;
+    if (still >= 1500) break;
+  }
+  for (let n = 0; n < frames; n++) {
+    viewer.resize();
+    scene.render();
+    await new Promise((r) => requestAnimationFrame(() => r()));
+  }
+  return { tiles: tileset ? tileset.statistics.numberOfTilesTotal : 0 };
+}
+
+async function shoot(i, j) {
+  if (pending) await pending;
+  pending = (async () => {
+    place(i, j);
+    const stat = await settle();
+    return { i, j, ...stat };
+  })();
+  return pending;
+}
+
+function fit() {
+  viewer.resize();
+  viewer.render();
+}
+// Headless pages can have requestAnimationFrame throttled, which would stop
+// Cesium's own loop before it ever asks for a tile. Drive frames from a timer.
+setInterval(() => {
+  try { viewer.resize(); scene.render(); } catch (e) { window.__errs.push(String(e)); }
+}, 120);
+window.addEventListener("resize", fit);
+setTimeout(fit, 200);
+setTimeout(fit, 1200);
+setTimeout(fit, 3000);
+
+window.__plate = {
+  S, viewer, shoot,
+  getTileset: () => tileset,
+  info: () => {
+    const c = viewer.scene.canvas;
+    return {
+      canvas: [c.width, c.height, c.style.width, c.style.height],
+      box: (() => { const r = document.getElementById("c").getBoundingClientRect(); const w = c.getBoundingClientRect(); return [r.width, r.height, w.width, w.height]; })(),
+      errs: window.__errs.slice(0, 6),
+      frame: scene.frameState.frameNumber,
+      frustum: viewer.camera.frustum?.constructor?.name,
+      frustumWidth: viewer.camera.frustum?.width,
+      camPos: viewer.camera.positionWC,
+      direction: viewer.camera.directionWC,
+      tiles: tileset && tileset.statistics.numberOfTilesTotal,
+      visited: tileset && tileset.statistics.numberOfTilesVisited,
+      loaded: tileset && tileset.tilesLoaded,
+      root: tileset && !!tileset.root,
+    };
+  },
+};
+(async () => {
+  await shoot(0, 0);
+  window.__ready = true;
+})();
+</script>
+</body>
+</html>
