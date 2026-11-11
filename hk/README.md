@@ -1,5 +1,8 @@
 # 香港岛 / Hong Kong Island
 
+目标在仓库根目录 README：一个真实的、完全离线的香港游戏。
+运行时只读本地瓦片。下面的正交相机只在制作底图时用，游戏不加载线上地图。
+
 底图是 Google Photorealistic 3D Tiles，用一台正交相机拍下来：
 
     hk/ortho.html        一台正交相机，Cesium 里画 Google 的三维瓦片
