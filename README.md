@@ -1,55 +1,116 @@
-# 香港岛 / Hong Kong Island
+# 香港岛 · 像素画离线地图
 
-**目标：一个真实的、完全离线的香港游戏。**
+一张可以拖着看、滚着放大的手绘香港岛。**完全离线**：运行时只读本地瓦片，
+不连 Google、不连任何服务。
 
-玩家打开的是本地图块，不联网，不请求 Google，也不请求任何在线地图。
-香港的海岸、街道和楼是真的：只在制作底图时拍一次 Google 的三维瓦片，
-整幅风格化之后切成本地文件，放进游戏。`hk/ortho.html` 和 `hk/shoot.mjs`
-是制作工具，不是游戏，运行时不许再去拉线上地图。
+![整幅](docs/hero.jpg)
 
-做法照
-[How Isometric Pixel City Was Made](https://www.yadongxie.com/blog/how-pixel-singapore-was-made)：
-一台正交相机把三维瓦片拍成一整幅底图，再整幅交给图像模型重绘，
-最后切成瓦片，由 `hk/map.html` 离线显示。
+- 画面 6144 × 4096，覆盖港岛北岸从坚尼地城到柴湾，加上海港对岸的九龙半岛一角
+- 瓦片 129 张（z0–z4），1:1 时是清晰的像素颗粒，放大不会糊
+- 同一套做法可以再套在任何一块地表上——换底图就行
 
-    hk/source/plate/      Google 三维瓦片的原始正交截图，24 个窗口 1024x1024
-    hk/source/hk-*.jpg    过程中留下的样张
-    hk/plate.png          拼好、刷过水色的整幅底图（6144x4096，48 MB，不进 git）
-    hk/flat-source.jpg    喂给图像模型的平涂色块底图（2400x1600）
-    hk/redraw.png         模型的输出（1872x1248）
-    hk/corner-redraw.png  同角重画一张，用来盖掉模型的水印
-    hk/art.png            成图（1858x1234）
-    hk/tiles/             Deep Zoom 金字塔 z0..z2，给 hk/map.html 用
-    hk/ortho.html         制作工具：正交相机。只在重拍底图时用，游戏不加载它
-    hk/shoot.mjs          制作工具：无头 Chrome 逐个窗口截底图
-    hk/serve.mjs          本地静态服务器，只拿来看已经落盘的瓦片
-    hk/build.py           拼版、体检、水色、色块化、修水印、切瓦片
-    hk/diffuse.py         MultiDiffusion 采样（本地 SDXL + 风格 LoRA）
-    hk/map.html           查看器
+## 怎么看
 
-详细说明在 [hk/README.md](hk/README.md)。
+```
+node hk/serve.mjs 8130
+open http://127.0.0.1:8130/hk/map.html
+```
 
-## 看图
+拖动移动，滚轮缩放，`0` 回到整幅，`+` / `-` 单级缩放。
 
-    node hk/serve.mjs 8130
-    open http://127.0.0.1:8130/hk/map.html
+## 图集
 
-## 重拍底图
+**上环 / 西营盘**——楼群顺着山势往上爬，坡下的街道被切成一块一块：
 
-    node hk/shoot.mjs --out hk/source/plate --cols 6 --rows 4 --w 1024 --h 1024 \
-      --mpp 1.1 --lon 114.1600 --lat 22.2770 --az -15 --tilt 45
-    .venv/bin/python hk/build.py --check
+![中环](docs/central.jpg)
 
-需要 `.env` 里的 `GOOGLE_MAPS_API_KEY`（`hk/key.js` 从它生成，已被 git 忽略）。
+**湾仔北 / 会展新翼**——伸进海里的那一块，连泊位和工地都留着：
 
-## 换图
+![湾仔](docs/wanchai.jpg)
 
-任何一张 1872x1248 左右的新画面丢进去就能出全套瓦片：
+**铜锣湾 / 跑马地**——马场那个椭圆是港岛最容易被认出的一笔：
 
-    .venv/bin/python hk/build.py --redraw 新图.png
+![铜锣湾](docs/causeway.jpg)
 
-游戏读的是本地瓦片。底图拍摄自 Google 三维影像，三维影像 © Google Maps。
-游戏运行时不再访问 Google。
+**太平山 / 山顶**——盘山路、屋苑、山间的水塘；山体只剩树冠和等高线的走向：
+
+![半山](docs/hills.jpg)
+
+**100% 原始像素**——放大到这个程度能看见笔触：色块是平的，树是一团一团的，
+楼的边缘是直上直下的：
+
+![像素细节](docs/detail-1to1.png)
+
+## 旧版 vs 现在
+
+上面那张是旧版（每次 API 调用只画一个窗口，再把 24 张拼起来），下面这张是现在
+（整幅一份 latent 跑完）。旧版的问题不只是"缝"——楼的形状会变、水面会换颜色，
+因为在每个窗口边界上，模型各自做了一次决定：
+
+![旧版与现在](docs/before-after.jpg)
+
+## 怎么做的
+
+三步，全部本地完成，**没有调用任何付费 API**：
+
+**1. 拍底图。** 用一台正交相机（朝北偏西 15°、向下 45°、1.1 米/像素）在
+`hk/ortho.html` 里拍 Google Photorealistic 3D Tiles，`hk/shoot.mjs` 逐个窗口截图，
+相邻窗口的相机恰好平移一个窗口宽。正交光线互相平行，所以 24 张能像素级对接，
+拼成 6144 × 4096 的底图 `plate.png`；再把 Google 反馈得乱七八糟的海面刷成一个港口色。
+
+**2. 重绘。** `hk/multidiff_qwen.py` 用 Qwen-Image-2.1-Turbo（20B 流匹配）+ 一张
+像素画 LoRA，按 [How Isometric Pixel City Was Made](https://www.yadongxie.com/blog/how-pixel-singapore-was-made)
+的做法在整幅上采样：一份 latent 覆盖全图（16×16 像素一格），每步在重叠的 1024 窗口上
+跑模型（步进 768），把预测的速度场按权重平均后写回同一份 latent；权重中间 512 像素是平的、
+边缘降到 0，奇数步网格整体再错 384 像素——于是这一步窗口交界的线，下一步正好落在窗口正中间。
+8 步，然后分块解码、在像素空间里重叠混合。
+
+**3. 切瓦片。** Deep Zoom 金字塔，512 像素一块、四周各多存 1 像素邻居（514×514），
+z0 到 z4。那圈余量是为了让浏览器在缩放比例不是整数时也有真实像素可采样，
+否则每块瓦片插值到自己的边界会 clamp，接缝上会出现一条 1 像素的线。
+
+## 怎么保证不断开
+
+"无缝"不是形容词，是量出来的。三层检查都在 `hk/multidiff_qwen.py` 里，
+每次跑完自动出数字：
+
+| 检查 | 现在的实测 | 通过线 |
+|---|---|---|
+| **A** 采样中，相邻窗口在 256 px 重叠带里预测速度的相对差（63 对） | 中位 **0.209**、最差 **0.299** | 无离群值 |
+| **B** 成图上，四种可能边界的间距（384 / 768 / 256 / 192 px）上的列间差 ÷ 邻域中位数 | 最差 **1.24** | ≤ 1.5 |
+| **C** 成图 vs 底图，216 块逐块平移搜索（±40 px） | 有纹理的 200 块里 **192 块位移 = (0,0)**，ncc 中位 0.92 | 全部 (0,0) |
+
+对照旧版：同一个画面里，列间差最高到 **107**（全图中位 19）、行间 **103**（中位 15），
+也就是 B 的口径下 **4~7 倍**，并且楼体在窗口边界上整块位移几十像素。
+
+A 这一项的关键是"没有离群"：最差 0.299 和平均 0.210 几乎一样，说明窗口之间
+没有哪一对在各自做决定——它们被平均成了一致的结果。
+
+## 局限（老实写在这里）
+
+- **颗粒度**：底图是 1.1 米/像素，一栋楼只有参考作品 1/5 的像素。想更细只能重拍底图
+  （0.25~0.5 米/像素，窗口数翻 4~20 倍），再做一遍。
+- **风格**：用的是 `handful/mndf-pixel-qwen-image-2.1`（MiniDF 那套像素画），
+  不是参考页作者自己那张 LoRA——他那张没有公开。
+- **8 步**：Turbo checkpoint 自带的调度就是 8 步；加步数不会更细，只会更慢。
+- **跑一次要一整晚**：20B 模型在 24 GB 的 M4 上跑 376 次前向约 8 小时，而且跑的
+  时候这台机器没法同时干别的（权重常驻 14~18 GB）。租一块 5080 是 40 分钟，
+  这里选了不花钱的那条路。
+- **没有动画**：车、鸟、树摇、水波都还没有。
+
+## 文件
+
+    hk/ortho.html          正交相机（Cesium 里画 Google 三维瓦片）
+    hk/shoot.mjs           无头 Chrome 逐窗截图
+    hk/build.py            拼版、体检、刷水色、色块化、切瓦片
+    hk/multidiff_qwen.py   Qwen-Image-2.1-Turbo + LoRA + MultiDiffusion（cond / sample / decode / report）
+    hk/map.html            查看器
+    hk/serve.mjs           同源静态服务器
+    hk/art.png             成图 6144×4096
+    hk/tiles/              Deep Zoom 金字塔 z0..z4
+    docs/                  README 用的图
+
+三维影像 © Google Maps。这一版是重绘的衍生物，仅供技术演示，不能当地图用。
 
 ---
 
