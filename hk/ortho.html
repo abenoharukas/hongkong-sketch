@@ -42,6 +42,10 @@ const S = {
   h: parseInt(q.get("h") ?? "1024", 10),
   cols: parseInt(q.get("cols") ?? "1", 10),
   rows: parseInt(q.get("rows") ?? "1", 10),
+  // Whole-grid offset in metres along the picture's right / up axes. Lets one
+  // big plate be split across several shooters and still land pixel-exact.
+  ox: parseFloat(q.get("ox") ?? "0"),
+  oy: parseFloat(q.get("oy") ?? "0"),
   overlap: parseFloat(q.get("overlap") ?? "0"), // picture pixels shared by neighbours
   sse: parseFloat(q.get("sse") ?? "4"),
   dist: parseFloat(q.get("dist") ?? "20000"),
@@ -131,8 +135,8 @@ if (q.get("ortho") !== "0") viewer.camera.frustum = frustum;
 
 function place(i, j) {
   // Centre of window (i, j) measured from the plate's centre, in picture axes.
-  const cx = (i + 0.5) * spanX - (S.cols * spanX) / 2;
-  const cy = (j + 0.5) * spanY - (S.rows * spanY) / 2;
+  const cx = (i + 0.5) * spanX - (S.cols * spanX) / 2 + S.ox;
+  const cy = (j + 0.5) * spanY - (S.rows * spanY) / 2 + S.oy;
   const eye = add(
     origin,
     scale(DIR, -S.dist),

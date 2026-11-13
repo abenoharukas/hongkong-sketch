@@ -43,6 +43,8 @@ const params = new URLSearchParams({
   h: String(H),
   cols: String(COLS),
   rows: String(ROWS),
+  ox: arg("ox", "0"),
+  oy: arg("oy", "0"),
   overlap: arg("overlap", "0"),
   sse: arg("sse", "4"),
   dist: arg("dist", "20000"),

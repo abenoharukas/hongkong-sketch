@@ -10,3 +10,14 @@ hk/key.js
 # 48 MB 的整幅底图（由 hk/source/plate 的 24 个窗口拼出来，可随时重建）
 hk/plate.png
 hk/redraw-clean.png
+
+# 中间产物与预览（可由底图重算，别塞进仓库）
+hk/plate-flat.png
+hk/plate-stylised.png
+hk/flat4096.png
+hk/redraw-flat4096.png
+hk/redraw-qwen.png
+hk/redraw-qwen-raw.png
+hk/art-v1.png
+hk/preview/
+hk/source/plate05/

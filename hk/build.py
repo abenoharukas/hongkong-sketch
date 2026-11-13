@@ -156,7 +156,7 @@ def water_fill(plate, radius=24, flat=10.0):
 
     out = np.asarray(rgb).copy()
     out[water] = colour
-    return Image.fromarray(out), colour
+    return Image.fromarray(out), colour, water
 
 
 def stylise(plate, px, colours, ink_threshold):
@@ -235,6 +235,189 @@ def from_redraw(path, size, colours):
     return image
 
 
+WATER_RAMP = ((0x1A, 0x5E, 0x63), (0x24, 0x74, 0x76), (0x2F, 0x8A, 0x88),
+              (0x3E, 0x9C, 0x97), (0x4F, 0xB0, 0xA8))
+VEG_RAMP = ((0x2C, 0x4A, 0x1E), (0x3A, 0x5E, 0x27), (0x4E, 0x7A, 0x34),
+            (0x66, 0x93, 0x3F), (0x86, 0xB1, 0x55))
+BUILT_RAMP = ((0x6F, 0x61, 0x52), (0x8A, 0x7A, 0x65), (0xA7, 0x93, 0x79),
+              (0xC0, 0xAC, 0x8E), (0xD8, 0xC9, 0xAE))
+ROAD_RAMP = ((0x33, 0x32, 0x2F), (0x45, 0x43, 0x40))
+# Hill sides are neither buildings nor lawns: smooth ground that the city's
+# texture test leaves alone. Without a family of its own it takes the built-up
+# beige and a mountain range reads as more city.
+TERRAIN_RAMP = ((0x3B, 0x45, 0x28), (0x49, 0x55, 0x30), (0x59, 0x66, 0x38),
+                (0x6D, 0x79, 0x46))
+
+
+def _ramps():
+    return (np.asarray(WATER_RAMP, np.float32),
+            np.asarray(VEG_RAMP, np.float32),
+            np.asarray(BUILT_RAMP, np.float32),
+            np.asarray(ROAD_RAMP, np.float32),
+            np.asarray(TERRAIN_RAMP, np.float32))
+
+
+def family_shape(rgb):
+    return rgb.shape[:2]
+
+
+def luma_of(rgb):
+    return 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
+
+
+def pixel_art(plate, px, colours, ink, water_mask, ink_min=26.0, tilt=0.0,
+              sharpen=1.25, flat=5):
+    """The reference look: flat colour families and a one-pixel ink line.
+
+    Two things separate this from a hand-drawn (or model-drawn) pass:
+
+    * **One cell, one colour, from its family.** Each art cell is classified as
+      water, vegetation, built or road from its hue and then takes a shade from
+      that family's ramp by its own brightness. A roof cannot pick a random
+      teal and a lawn cannot pick a beige, so the picture reads as a map of flat
+      surfaces instead of a photograph in 40 colours. `colours` limits how many
+      ramp steps are actually used.
+    * **The ink is the cell boundary.** A cell is inked when the cell to its
+      right or below it belongs to a different family or shade, so every line is
+      exactly one cell wide -- the same width on a tower, a coastline and a
+      coastline corner. Nothing here draws a stroke, so no stroke can vary.
+
+    """
+    w, h = plate.size
+    art = plate.filter(ImageFilter.MedianFilter(flat)).filter(
+        ImageFilter.GaussianBlur(0.6))
+    art = art.resize((max(1, w // px), max(1, h // px)), Image.BOX)
+    art = art.filter(ImageFilter.MedianFilter(3))
+    if sharpen > 1.0:
+        art = art.filter(ImageFilter.UnsharpMask(
+            radius=1.0, percent=int((sharpen - 1.0) * 100), threshold=2))
+
+    rgb = np.asarray(art, np.float32) / 255.0
+    r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+    mx = rgb.max(axis=2)
+    mn = rgb.min(axis=2)
+    delta = mx - mn
+    sat = np.where(mx > 0.0, delta / np.maximum(mx, 1e-6), 0.0)
+    hue = np.zeros_like(mx)
+    safe = np.maximum(delta, 1e-6)
+    r_dom = (mx == r)
+    g_dom = (mx == g) & ~r_dom
+    b_dom = ~r_dom & ~g_dom
+    hue[r_dom] = (((g - b)[r_dom] / safe[r_dom]) % 6.0)
+    hue[g_dom] = ((b - r)[g_dom] / safe[g_dom]) + 2.0
+    hue[b_dom] = ((r - g)[b_dom] / safe[b_dom]) + 4.0
+    hue *= 60.0
+
+    # Water is the mask water_fill() already found by flatness, not a hue band:
+    # in this render the shaded glass, the blue-grey roofs and the hazy sides of
+    # the hills all sit in the water band, and a hue test paints teal specks
+    # over the whole city. Take the real sea, then classify the land.
+    water = water_mask
+    if water.shape != rgb.shape[:2]:
+        water = np.asarray(
+            Image.fromarray((water.astype(np.uint8) * 255))
+            .resize((rgb.shape[1], rgb.shape[0]), Image.NEAREST)) > 127
+
+    # Vegetation: green has to *dominate* red and blue, which survives haze and
+    # shadow far better than a hue threshold does.
+    green_excess = g - np.maximum(r, b)
+    veg = (green_excess > 0.008) & (sat > 0.08) & ~water
+    veg = ndimage.binary_opening(veg, np.ones((2, 2), bool))
+    labels, count = ndimage.label(veg)
+    if count:
+        sizes = ndimage.sum(veg, labels, range(1, count + 1))
+        small = np.concatenate(([0], np.nonzero(sizes < 40)[0] + 1))
+        veg = veg & ~np.isin(labels, small)
+
+    # A city is texture; a hillside is not. Measure how much the picture moves
+    # in a small window: towers and roofs are busy, a slope under haze is even.
+    grey = luma_of(rgb)
+    mean = ndimage.uniform_filter(grey, 5)
+    structure = np.sqrt(np.maximum(
+        0.0, ndimage.uniform_filter(grey * grey, 5) - mean * mean))
+    terrain = (structure < 0.022) & ~water & ~veg
+
+    road = (sat <= 0.12) & (mx < 0.26) & ~water & ~veg & ~terrain
+    family = np.where(water, 0,
+             np.where(veg, 1,
+             np.where(terrain, 4,
+             np.where(road, 3, 2))))
+
+    # Majority vote in a 5 x 5 cell window. Single cells of the wrong family
+    # are photographic noise, not places: they put one teal or one beige speck
+    # in the middle of a lawn and the ink then draws a box around each speck.
+    best = np.zeros(family.shape, np.float32)
+    voted = np.zeros(family.shape, np.int8)
+    for index in range(5):
+        score = ndimage.uniform_filter((family == index).astype(np.float32), 5)
+        better = score > best
+        best[better] = score[better]
+        voted[better] = index
+    family = voted
+    del best
+
+    ramps = _ramps()
+    steps = max(2, min(5, int(colours) // 8))
+    luma = 0.299 * r + 0.587 * g + 0.114 * b
+    del mx, mn, delta, sat, hue, safe, green_excess, structure, terrain
+    out = np.zeros(rgb.shape, np.float32)
+    shade = np.zeros(family.shape, np.int32)
+    for index, ramp in enumerate(ramps):
+        mask = family == index
+        if not mask.any():
+            continue
+        if index == 0:
+            # one harbour colour: a brightness ramp here only re-bands the sea
+            out[mask] = ramp[len(ramp) // 2]
+            continue
+        count = min(steps, len(ramp))
+        ramp = ramp[:count] if count < len(ramp) else ramp
+        values = luma[mask]
+        ranks = np.argsort(np.argsort(values)).astype(np.float32) / max(
+            1, values.size - 1)
+        pick = np.clip((ranks * count).astype(np.int32), 0, count - 1)
+        local = np.zeros(values.shape, np.int32)
+        local[:] = pick
+        shade[mask] = local
+        out[mask] = ramp[local]
+
+    # Ink: a cell is inked where its right or lower neighbour is a different
+    # (family, shade) cell. Exactly one cell wide, by construction.
+    right = np.zeros(family.shape, bool)
+    lower = np.zeros(family.shape, bool)
+    shade_jump = 3
+    right[:, :-1] = (family[:, :-1] != family[:, 1:]) | (
+        np.abs(shade[:, :-1] - shade[:, 1:]) >= shade_jump)
+    lower[:-1, :] = (family[:-1, :] != family[1:, :]) | (
+        np.abs(shade[:-1, :] - shade[1:, :]) >= shade_jump)
+    contrast = np.zeros(family.shape, np.float32)
+    contrast[:, :-1] = np.max(np.abs(out[:, :-1] - out[:, 1:]), axis=2)
+    contrast[:-1, :] = np.maximum(
+        contrast[:-1, :], np.max(np.abs(out[:-1, :] - out[1:, :]), axis=2))
+    ink_mask = (right | lower) & (contrast >= ink_min)
+
+    out[ink_mask] = np.asarray(ink, np.float32)
+    image = Image.fromarray(np.clip(out, 0, 255).astype(np.uint8), "RGB")
+    if tilt > 0.0:
+        image = tilt_shift(image, tilt)
+    return image
+
+
+def tilt_shift(image, amount=1.0):
+    """Blur the top and bottom of the frame, keep a sharp band across the
+    middle: the miniature effect the reference page does with two backdrop
+    filters."""
+    w, h = image.size
+    blurred = image.filter(ImageFilter.GaussianBlur(max(1.0, h / 220.0 * amount)))
+    # weight 1 in the middle third, falling to 0 at the edges
+    rows = np.arange(h, dtype=np.float32) / max(1, h - 1)
+    centre = 0.5
+    weight = np.clip((np.abs(rows - centre) - 0.16) / 0.30, 0, 1) ** 1.3
+    mask = np.repeat(weight[:, None], w, axis=1)
+    mask = Image.fromarray((mask * 255).astype(np.uint8), "L")
+    return Image.composite(blurred, image, mask)
+
+
 def pyramid(image, out_dir, tile=TILE, overlap=1):
     """Deep-zoom levels, parent pixel = mean of its four children.
 
@@ -307,7 +490,7 @@ def main():
     if check_only:
         return
 
-    plate, water = water_fill(plate)
+    plate, water, water_mask = water_fill(plate)
     print(f"  water fill {water}")
     plate.save(os.path.join(HERE, "plate.png"))
     redraw = _arg("--redraw")
@@ -328,12 +511,17 @@ def main():
     elif "--raw" in sys.argv:
         art = plate                      # 原图直出，不做风格化，用来看瓦片衔接
     else:
-        art = stylise(plate, px, colours, ink)
+        art = pixel_art(
+            plate, px, colours,
+            tuple(int(v) for v in _arg("--ink-rgb", "34,30,27").split(",")),
+            water_mask,
+            ink_min=float(_arg("--ink-min", "26")),
+            tilt=float(_arg("--tilt", "0")))
+        print(f"  pixel art: {px} plate px per cell, {colours} colours, 1 px ink")
     art.save(os.path.join(HERE, "art.png"))
     levels, width, height = pyramid(art, os.path.join(HERE, "tiles"))
     write_page(levels, width, height, water)
     print(f"art {width}x{height}  levels 0..{levels}  version {VERSION}")
-
 
 if __name__ == "__main__":
     main()
