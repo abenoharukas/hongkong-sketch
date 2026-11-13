@@ -46,48 +46,67 @@ def water_of(pixels, source, tol=60, min_area=8000):
     return ndi.binary_dilation(keep, np.ones((9, 9), bool)) & (blueish | green) & land, None
 
 
-def donor_patch(pixels, mask, cy, cx, size=256):
-    """A clean painted square near the blob to borrow canopy texture from."""
+def canopy_donors(pixels, mask, size=128, want=12):
+    """The most canopy-dense clean squares around: flat lawn donors make bald hills."""
     h, w = mask.shape
-    for dist in (0, 160, 260, 380, 520, 700, 900):
-        for dy, dx in ((0, -dist), (0, dist), (-dist, 0), (dist, 0)):
-            y0, x0 = cy + dy - size // 2, cx + dx - size // 2
-            if y0 < 0 or x0 < 0 or y0 + size > h or x0 + size > w:
+    g = pixels.astype(np.float32)
+    gy = np.abs(np.diff(g, axis=0)).mean(-1)
+    gx = np.abs(np.diff(g, axis=1)).mean(-1)
+    edge = np.zeros((h, w), np.float32)
+    edge[:-1] += gy
+    edge[:, :-1] += gx
+    gm = pixels.astype(np.float32).mean(-1)
+    green = ((pixels[..., 1].astype(np.int16) - pixels[..., 0]) > 12).astype(np.float32)
+    cands = []
+    for y in range(0, h - size, 64):
+        for x in range(0, w - size, 64):
+            if mask[y:y + size, x:x + size].any():
                 continue
-            if mask[y0:y0 + size, x0:x0 + size].mean() < 0.01:
-                return pixels[y0:y0 + size, x0:x0 + size]
-    return None
+            if green[y:y + size, x:x + size].mean() < 0.85:
+                continue
+            score = edge[y:y + size, x:x + size].mean()
+            cands.append((score, y, x))
+    cands.sort(reverse=True)
+    picked, donors = [], []
+    for score, y, x in cands:
+        if len(picked) >= want:
+            break
+        if all(abs(y - py) + abs(x - px) > size for _, py, px in picked):
+            picked.append((score, y, x))
+            donors.append(pixels[y:y + size, x:x + size])
+    if not donors:
+        return []
+    return donors
 
 
-def fill_blob(pixels, blob, mask, src, size=256):
-    """Tile a clean canopy patch over the blob and follow the source's own shading."""
+def fill_blob(pixels, blob, mask, src, size=96):
+    """Tile canopy-only donors over the blob, keep the hill's own light and shade."""
     ys, xs = np.nonzero(blob)
-    cy, cx = int(ys.mean()), int(xs.mean())
-    patch = donor_patch(pixels, mask, cy, cx, size)
     y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
-    if patch is None:
+    donors = canopy_donors(pixels, mask)
+    if not donors:
         return None
-    tiles = []
-    rng = np.random.default_rng(len(ys))
-    for ty in range(y0, y1, size):
-        for tx in range(x0, x1, size):
-            p = patch
+    rng = np.random.default_rng(int(ys.sum()))
+    patch = max(donors[0].shape[0], size)
+    canvas = np.zeros((y1 - y0, x1 - x0, 3), np.float32)
+    for ty in range(0, y1 - y0, size):
+        for tx in range(0, x1 - x0, size):
+            d = donors[rng.integers(len(donors))]
+            oy = int(rng.integers(patch - size + 1))
+            ox = int(rng.integers(patch - size + 1))
+            t = d[oy:oy + size, ox:ox + size].astype(np.float32)
             if rng.random() < 0.5:
-                p = p[:, ::-1]
+                t = t[:, ::-1]
             if rng.random() < 0.5:
-                p = p[::-1]
-            tiles.append((ty, tx, p))
-    canvas = pixels.copy()
-    for ty, tx, p in tiles:
-        ey, ex = min(ty + size, canvas.shape[0]), min(tx + size, canvas.shape[1])
-        canvas[ty:ey, tx:ex] = p[: ey - ty, : ex - tx]
-    # modulate with the source's low-frequency shading so hills stay hills
-    lum = src[y0:y1, x0:x1].mean(-1)
-    lo, hi = np.percentile(lum, 5), np.percentile(lum, 95)
-    t = np.clip((lum - lo) / max(hi - lo, 1e-3), 0, 1)[..., None]
-    tile_part = canvas[y0:y1, x0:x1].astype(np.float32)
-    tone = 0.72 + 0.56 * t
-    return y0, y1, x0, x1, tile_part * tone
+                t = t[::-1]
+            ey = min(ty + size, y1 - y0)
+            ex = min(tx + size, x1 - x0)
+            canvas[ty:ey, tx:ex] = t[:ey - ty, :ex - tx]
+    # follow the source's broad shading so ridges read as ridges
+    lum = ndi.gaussian_filter(src[y0:y1, x0:x1].astype(np.float32).mean(-1), 21)
+    ref = np.median(lum)
+    tone = np.clip(lum / max(ref, 1e-3), 0.80, 1.18)[..., None]
+    return y0, y1, x0, x1, canvas * tone
 
 
 def refill(pixels, mask, src=None):
