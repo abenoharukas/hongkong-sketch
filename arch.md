@@ -32,40 +32,91 @@ keeping boats.
 ## 2. The repaint
 
 `hk/multidiff_qwen.py` runs **Qwen-Image-2.1-Turbo** (20B, flow matching) with the
-pixel-art LoRA `handful/mndf-pixel-qwen-image-2.1`, following
+pixel-art LoRA `handful/mndf-pixel-qwen-image-2.1` fused into the transformer,
+following
 [How Isometric Pixel City Was Made](https://www.yadongxie.com/blog/how-pixel-singapore-was-made).
+The LoRA is a style weight. It does not take the plate as input. The plate is
+conditioning, and the transformer does the painting.
 
-The point of the method is that there are no tiles to reconcile:
+The painter does not edit the 6144 × 4096 pixels, and one call does not see all of
+them. It edits one grid of numbers. A decoder turns that grid into pixels at the end.
 
-| | |
-|---|---|
-| latent | one tensor for the whole canvas, one cell per 16 × 16 px |
-| window | 1024 px, stride 768 (256 px of overlap) |
-| weight | flat across the middle 512 px, cosine to 0 at the window edge |
-| grid shift | every other step the whole grid moves 384 px |
-| steps | 8, the schedule the Turbo checkpoint ships with |
-| update | velocities averaged with the weights, one Euler step with the averaged velocity |
-| conditioning | each window sees its own crop of `plate.png`, both as vision tokens for the Qwen3-VL text encoder and as VAE-encoded tokens prepended to the target |
+### Step 1. One grid for the whole plate
 
-Because the weight is zero at a window edge, an edge never decides anything; because
-the grid shifts by half a stride, the line where two windows met on one step falls in
-the flat middle of a window on the next. The result is one denoising trajectory over
-one latent, not a mosaic.
+The VAE folds every 16 × 16 pixels into one cell. A cell holds 64 numbers. Those 64
+numbers are stacked on that cell the way red, green and blue are stacked on one
+pixel: 64 layers at the same place, not 64 pictures and not 64 calls.
 
-Decoding uses the same idea in pixel space: the latent is decoded in overlapping
-tiles and blended, since a 20B VAE at 6144 × 4096 does not fit in memory in one go.
+| | pixels | cells |
+|---|---|---|
+| whole plate | 6144 × 4096 | 384 × 256 |
+| one cell | 16 × 16 | 1 cell, 64 numbers |
+| one call | 1024 × 1024 | 64 × 64 cells |
 
-Two practical constraints shaped the code:
+384 × 16 = 6144 and 256 × 16 = 4096, so this single grid already covers the plate.
+Sampling starts from noise of shape `(1, 1, 256, 384, 64)`.
 
-- **Memory.** The text encoder is 17.5 GB and the transformer 14.2 GB; on a 24 GB
-  machine they cannot both be resident. So the tool is split into stages —
-  `--stage cond` writes one cache file per window, `--stage sample` reloads them —
-  and each stage can be run and stopped independently.
-- **Resumability.** Every stage checkpoints: conditioning skips windows that already
-  have a cache file, sampling saves the latent after every step. A run killed at any
-  point resumes instead of starting over.
+### Step 2. One call reads a 64 × 64 window
+
+A call slices 64 × 64 cells out of that grid. 64 × 16 = 1024, so the slice is
+1024 × 1024 pixels of the plate. The call also reads that same crop of `plate.png`,
+twice: the Qwen3-VL text encoder sees it as an image, and the VAE encodes it into
+tokens prepended to the 64 × 64 cells. The transformer returns a velocity for those
+4096 cells. It does not return pixels.
+
+### Step 3. Slide the window across the grid
+
+The window is smaller than the grid, so each step slides it.
+
+- Stride 768 px = 48 cells. A window is 64 cells wide, so neighbours overlap by
+  16 cells = 256 px.
+- Even steps start every 48 cells. The last start is pulled back so the window ends
+  on the plate edge: 8 × 5 = **40** calls.
+- Odd steps move every start by 384 px = 24 cells: 9 × 6 = **54** calls.
+- 8 steps, the schedule shipped with the Turbo checkpoint: 4 × 40 + 4 × 54 = **376**
+  calls.
+- The two start-grids share four corners, so conditioning caches **90** distinct crops.
+
+### Step 4. Average the overlap back into the same cells
+
+An overlap cell is still one cell on the grid. Both windows predict a velocity for
+it. The predictions are weighted-averaged and written once.
+
+The weight is flat across the middle 512 px (32 cells) and falls to 0, by a squared
+sine, over the outer 256 px (16 cells) on each side. That outer band is the overlap,
+so a window edge contributes nothing. The 24-cell shift on the odd step puts the line
+where two windows met into the flat middle of a window, and that middle paints the
+line again.
+
+The grid then takes one Euler step: add `(sigma[i+1] − sigma[i])` times the averaged
+velocity.
+
+### Step 5. Decode the grid into one picture
+
+The VAE expands each cell back to its 16 × 16 pixels. Decoding the whole grid at
+once does not fit in memory, so the decoder walks it in blocks of 32 cells with 8
+cells of overlap and blends those pixels. The blend is only the decoder's footprint.
+The picture is already one grid.
+
+The 512 px files under `hk/tiles/` are a later cut of this finished PNG. They are
+not the windows above.
+
+### How the run is split
+
+The text encoder is 17.5 GB and the transformer is 14.2 GB. On a 24 GB machine they
+cannot be resident together, so this is two processes, and either one can stop and
+resume:
+
+1. `--stage cond` writes one `cond_x_y.pt` per distinct window (the crop's text
+   embeddings and VAE tokens). A file that already exists is skipped.
+2. `--stage sample` loads the transformer, fuses the LoRA, runs the 376 calls, and
+   saves the whole grid after every step to `<out>.state.pt`. Decode runs at the end
+   of sample, or on its own with `--stage decode` from that state file.
 
 ## 3. Tiles
+
+These are browser tiles, cut from the finished PNG. The 1024 px windows in §2 are
+gone by this point.
 
 `pyramid()` cuts a Deep Zoom-style grid: 512 px tiles with **1 px of neighbour on
 every side** (514 × 514), z0 through z4, each parent pixel the mean of its four
