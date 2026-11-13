@@ -63,6 +63,7 @@ def main():
     ap.add_argument("--out", default=None)
     ap.add_argument("--tol", type=float, default=42)
     ap.add_argument("--paint-tol", type=float, default=50)
+    ap.add_argument("--max-object", type=int, default=30000)
     ap.add_argument("--min-area", type=int, default=150000)
     ap.add_argument("--max-std", type=float, default=9.0)
     a = ap.parse_args()
@@ -78,8 +79,22 @@ def main():
         raise SystemExit("no flat water found in the source")
     painted_water = art[water].astype(np.float32)
     colour = np.median(painted_water, 0)
-    is_water_art = np.linalg.norm(art.astype(np.float32) - colour, axis=-1) < a.paint_tol
-    bad = water & ~is_water_art
+
+    # Keep only things that sit *inside* the water and are small: boats, barges,
+    # buoys. Everything else the painter put where the source is water - invented
+    # districts, their soft shadows, their piers - goes.
+    solid = ~water
+    lab, n = ndi.label(solid)
+    keep = np.zeros_like(water)
+    if n:
+        sizes = ndi.sum(solid, lab, range(1, n + 1))
+        land = int(np.argmax(sizes)) + 1
+        for i, s in enumerate(sizes, 1):
+            if i != land and s < a.max_object:
+                keep |= lab == i
+    keep = ndi.binary_dilation(keep, np.ones((5, 5), bool))
+
+    bad = water & ~keep
     out = art.copy()
     out[bad] = colour.astype(np.uint8)
     dst = a.out or a.image
