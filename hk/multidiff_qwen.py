@@ -120,7 +120,7 @@ def pick_dtype(name, device):
     return {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}[name]
 
 
-def pipeline(device, dtype, want, lora=None, lora_scale=1.0, gguf=None):
+def pipeline(device, dtype, want, lora=None, lora_scale=1.0):
     """A pipeline holding only the components `want` names, so the 17.5 GB text
     encoder and the 14.2 GB transformer never have to be resident together."""
     path = MODEL
@@ -132,14 +132,6 @@ def pipeline(device, dtype, want, lora=None, lora_scale=1.0, gguf=None):
         from transformers import Qwen3VLForConditionalGeneration
         text_encoder = Qwen3VLForConditionalGeneration.from_pretrained(
             os.path.join(path, "text_encoder"), torch_dtype=dtype, low_cpu_mem_usage=True)
-    elif want == "sample" and gguf:
-        # Q4_K_M is 4.2 GB against 14.2 GB for fp16: the whole point is that this
-        # machine can keep working while the sampling runs. Weights are
-        # dequantised per layer on the fly, so it is slower, not smaller-faster.
-        from diffusers import GGUFQuantizationConfig
-        transformer = QwenImage21Transformer2DModel.from_single_file(
-            gguf, quantization_config=GGUFQuantizationConfig(compute_dtype=dtype),
-            config=os.path.join(path, "transformer", "config.json"), torch_dtype=dtype)
     elif want == "sample":
         transformer = QwenImage21Transformer2DModel.from_pretrained(
             os.path.join(path, "transformer"), torch_dtype=dtype, low_cpu_mem_usage=True)
@@ -280,7 +272,7 @@ def target_mask(blob):
 def stage_sample(args, region):
     x0, y0, width, height = region
     device, dtype = args.device, pick_dtype(args.dtype, args.device)
-    pipe = pipeline(device, dtype, "sample", args.lora, args.lora_scale, args.gguf)
+    pipe = pipeline(device, dtype, "sample", args.lora, args.lora_scale)
     torch.manual_seed(args.seed)
 
     n = cells(WINDOW)
@@ -478,8 +470,6 @@ def main():
     ap.add_argument("--control", action="store_true", help="also run the per-window baseline")
     ap.add_argument("--audit", action="store_true",
                     help="measure neighbour disagreement on the last step (A)")
-    ap.add_argument("--gguf", default=None,
-                    help="GGUF quantised transformer (Q4_K_M = 4.2 GB); slower, far less memory")
     ap.add_argument("--lora", default=None, help="style LoRA: local path or hub repo")
     ap.add_argument("--lora-scale", type=float, default=1.0)
     ap.add_argument("--resume", action="store_true", help="continue from <out>.state.pt")
