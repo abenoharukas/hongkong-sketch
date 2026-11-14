@@ -180,6 +180,9 @@ occupy 14–18 GB of the 24 GB of unified memory.
   page, whose LoRA is not public.
 - **8 steps.** That is the Turbo schedule. More steps buy time, not detail.
 - **No animation.** Traffic, birds, swaying trees and moving water are not there.
+- **One weight set.** `~/models` holds the fp16 transformer only (31 GB with the
+  text encoder and VAE). There is no quantised fallback: on less than 24 GB of
+  unified memory this run does not fit.
 
 ## 7. Files
 
