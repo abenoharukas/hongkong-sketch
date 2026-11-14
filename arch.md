@@ -261,10 +261,14 @@ kept word for word: it is the reason the pipeline above is what it is.
 
 ### 早先记录的"正确的做法"（保留原文，作为当时的结论）
 
-用 `hk/diffuse.py`（就是按文档实现的 MultiDiffusion：WINDOW=1024、STRIDE=768、权重中间平边缘降），
-在**一张真正能跑 20B 模型的 GPU** 上跑整幅底图，再 `build.py --redraw` 切瓦片。
+先在一个能跑 SDXL 的环境里按文档实现 MultiDiffusion（WINDOW=1024、STRIDE=768、权重中间平边缘降），
+跑整幅底图，再 `build.py --redraw` 切瓦片。
 文档里的参考数字：273 个窗口、8 步、2.15 秒/窗口、峰值显存 14.84 GB、单块约 100 分钟。
 本机 M4 / 24 GB 统一内存跑不了这个模型，所以这一步必须租 GPU 或换机器，不能用 API 拼凑。
+
+> **2026-11-14 已清理。** 这条 SDXL 路线（脚本 `hk/diffuse.py` 与权重 `~/models/sdxl-base`、
+> `~/models/lora/`）已被上面的 Qwen 全画布方案取代：它的产出就是「楼体错位、窗口断层」那一版。
+> 脚本随权重一并删除，此处只留结论作历史记录。要复现这条老路线，得重新下 SDXL 权重。
 
 ### 我给用户造成的损失（逐条，可核对）
 
