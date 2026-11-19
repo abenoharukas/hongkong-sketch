@@ -151,7 +151,7 @@ The version this replaced, measured the same way, showed column differences up t
 ## 5. Running it
 
 ```
-# base render (needs a Google Maps key in hk/key.js)
+# base render (needs GOOGLE_MAPS_API_KEY in the environment)
 node hk/shoot.mjs --out hk/source/plate --cols 6 --rows 4 --w 1024 --h 1024 \
   --mpp 1.1 --lon 114.1600 --lat 22.2770 --az -15 --tilt 45
 python hk/build.py --check                 # window-to-window seam report

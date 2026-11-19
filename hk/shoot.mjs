@@ -25,10 +25,15 @@ const ROWS = parseInt(arg("rows", "3"), 10);
 const W = parseInt(arg("w", "1024"), 10);
 const H = parseInt(arg("h", "1024"), 10);
 const PORT = parseInt(arg("port", "9333"), 10);
-const KEY =
-  arg("key") ||
-  process.env.GOOGLE_MAPS_API_KEY ||
-  "REDACTED_GOOGLE_MAPS_KEY";
+const KEY = arg("key") || process.env.GOOGLE_MAPS_API_KEY;
+if (!KEY) {
+  console.error(
+    "Missing Google Maps API key.\n" +
+      "  export GOOGLE_MAPS_API_KEY=...   # or pass --key <KEY>\n" +
+      "Never hardcode the key in source.",
+  );
+  process.exit(1);
+}
 const CHROME =
   arg("chrome") || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
